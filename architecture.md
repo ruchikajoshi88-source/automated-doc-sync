@@ -6,8 +6,9 @@
 | --- | --- |
 | **Product** | Automated Documentation Sync |
 | **Version** | 1.0 (MVP) |
-| **Status** | Proposed |
+| **Status** | Reviewed — approved with adjustments |
 | **Requirements Reference** | [requirements.md](./requirements.md) |
+| **Design Review** | [design-review.md](./design-review.md) |
 | **Last Updated** | 2026-08-14 |
 
 ---
@@ -32,8 +33,8 @@ Design goals aligned with [requirements.md](./requirements.md):
 | **Runtime** | Python 3.10+ | Required by spec; `ast` and type-hint introspection are first-class. |
 | **Parsing** | Standard library `ast` | Meets FR-010/NFR-002; no external parser runtime; avoids executing target code (NFR-021). |
 | **CLI framework** | [Click](https://click.palletsprojects.com/) | Declarative commands/subcommands, `--help` generation (NFR-030), clean exit-code mapping (NFR-032). |
-| **Configuration** | `.doc-sync.yaml` + optional `[tool.doc-sync]` in `pyproject.toml` | Human-readable project config (FR-050); YAML via **PyYAML**; TOML via **stdlib `tomllib`** (3.11+) with **`tomli`** fallback on 3.10. |
-| **Path & glob handling** | `pathlib` + `fnmatch` / `pathspec` | Stdlib covers basics; **pathspec** (optional dep) improves `.gitignore`-style exclude rules if needed. |
+| **Configuration** | `.doc-sync.yaml` + optional `[tool.doc-sync]` in `pyproject.toml` | Human-readable project config (FR-050); **`yaml.safe_load` only** (DD-02); TOML via **stdlib `tomllib`** (3.11+) with **`tomli`** fallback on 3.10; strict schema validation. |
+| **Path & glob handling** | `pathlib` + **pathspec** | **pathspec** required for gitignore-compatible include/exclude rules (DD-14, FR-011). |
 | **Git integration** | Subprocess calls to `git` CLI | No libgit2 binding required for MVP; staging and hook install only (FR-027). |
 | **Testing** | pytest + pytest-cov | Standard Python ecosystem; supports unit and fixture-based integration tests (NFR-041/042). |
 | **Packaging** | `pyproject.toml` + setuptools/hatchling | Modern installable package with console script entry point (`doc-sync`). |
@@ -96,12 +97,14 @@ flowchart TB
 
     subgraph Persistence["Persistence Layer"]
         DocWriter["DocumentationWriter"]
-        PathValidator["PathValidator"]
+        PathValidator["PathValidator<br/>(sandbox + symlinks)"]
+        StaleDocs["StaleDocManager"]
+        RunLock["RunLock"]
     end
 
     subgraph GitLayer["Git Integration Layer"]
-        GitStager["GitStager"]
-        HookInstaller["HookInstaller"]
+        GitStager["GitStager<br/>(subprocess hardening)"]
+        HookInstaller["HookInstaller<br/>(chain + backup)"]
     end
 
     CLI --> Engine
@@ -125,6 +128,8 @@ flowchart TB
     MdRenderer --> CustomMerger
     CustomMerger --> DocWriter
     DocWriter --> PathValidator
+    Engine --> StaleDocs
+    Engine --> RunLock
     Engine --> GitStager
     Engine --> Reporter
     CLI --> HookInstaller
@@ -151,6 +156,7 @@ flowchart TD
     subgraph Config["doc_sync.config"]
         loader["loader.py"]
         schema["schema.py"]
+        validator["validator.py"]
     end
 
     subgraph Scan["doc_sync.scanner"]
@@ -182,6 +188,8 @@ flowchart TD
     subgraph IO["doc_sync.io"]
         writer["doc_writer.py"]
         paths["path_validator.py"]
+        stale["stale_doc_manager.py"]
+        lock["run_lock.py"]
     end
 
     subgraph Git["doc_sync.git"]
@@ -200,7 +208,11 @@ flowchart TD
     engine --> stager
     engine --> reporter
     loader --> schema
+    loader --> validator
+    validator --> paths
     scanner --> paths
+    engine --> stale
+    engine --> lock
     ast_parser --> module_ext
     ast_parser --> symbol_ext
     ast_parser --> fastapi_ext
@@ -226,37 +238,38 @@ flowchart TD
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
 | `cli.py` | Exposes `doc-sync sync`, `doc-sync install-hook`, global flags (`--repo-root`, `--config`, `--stage`). Maps exit codes. | FR-001, FR-002, FR-027, NFR-030, NFR-032 |
-| `hook.py` | Thin wrapper invoked by Git pre-commit; delegates to `SyncEngine`; applies blocking vs non-blocking policy. | FR-003, FR-004, FR-043, FR-044 |
+| `hook.py` | Thin wrapper invoked by Git pre-commit; delegates to `SyncEngine`; **incremental mode** syncs only when staged `*.py` or config changed (DD-06); applies blocking vs non-blocking policy. | FR-003, FR-004, FR-043, FR-044 |
 
 ### 5.2 Orchestration (`doc_sync.core`)
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `sync_engine.py` | End-to-end pipeline coordinator: load config → scan → parse/extract → render → merge → write → optional stage. Aggregates per-file errors. | FR-023, NFR-040 |
+| `sync_engine.py` | End-to-end pipeline coordinator: acquire run lock → load config → scan → parse/extract → render → merge → write → prune stale docs → optional stage. Aggregates per-file errors. | FR-023, NFR-040, DD-05, DD-09 |
 | `reporter.py` | Emits stderr warnings and final summary (processed/skipped/warned/generated counts). | FR-045, NFR-031 |
 
 ### 5.3 Configuration (`doc_sync.config`)
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `loader.py` | Discovers and loads `.doc-sync.yaml` or `[tool.doc-sync]` from `pyproject.toml`; merges CLI overrides. | FR-050 |
-| `schema.py` | Validated config dataclass: `repo_root`, `output_dir`, `include`/`exclude` globs, `custom_block_markers`, `stage_on_sync`. | FR-051, FR-052, NFR-011 |
+| `loader.py` | Discovers and loads `.doc-sync.yaml` or `[tool.doc-sync]` from `pyproject.toml` using **`yaml.safe_load` only**; merges CLI overrides; rejects unknown keys. | FR-050, DD-02 |
+| `schema.py` | Validated config dataclass: `repo_root`, `output_dir`, `include`/`exclude` globs, `custom_block_markers`, `stage_on_sync`, `prune_orphans`, `include_private`, `max_source_bytes`. | FR-051, FR-052, NFR-011 |
+| `validator.py` | Validates config values: relative `output_dir`, positive size limits, well-formed glob patterns. | DD-02, DD-10 |
 
 ### 5.4 Discovery (`doc_sync.scanner`)
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `repository_scanner.py` | Walks repo tree; yields `.py` file paths matching include/exclude rules; skips `venv`, `.git`, `__pycache__`. | FR-011 |
+| `repository_scanner.py` | Walks repo tree; yields `.py` file paths matching include/exclude rules via **pathspec**; skips `venv`, `.git`, `__pycache__`; does not follow symlinks. | FR-011, DD-01, DD-14 |
 
 ### 5.5 Parsing & Extraction (`doc_sync.parser`, `doc_sync.extractors`)
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `ast_parser.py` | Reads source, runs `ast.parse()`, catches `SyntaxError`, returns `ParseResult` (tree or error). Never executes module code. | FR-010, FR-040, NFR-021 |
+| `ast_parser.py` | Reads source (UTF-8 strict, encoding detection fallback), enforces `max_source_bytes` (default 1 MiB), runs `ast.parse()`, catches `SyntaxError`, returns `ParseResult`. Never executes module code. | FR-010, FR-040, NFR-021, DD-10, DR-013 |
 | `module.py` | Extracts module docstring and qualified module name. | FR-012, FR-018 |
-| `symbols.py` | Extracts classes, methods, functions; captures docstrings, signatures, type hints; builds placeholders when docstrings absent. | FR-013, FR-014, FR-017 |
-| `fastapi_routes.py` | Detects `@app.get/post/...`, `@router.*` decorators; extracts HTTP method, path, handler, decorator kwargs (`summary`, `description`). | FR-015 |
-| `flask_routes.py` | Detects `@app.route`, `@blueprint.route`; extracts methods, rule, endpoint; falls back to handler docstring. | FR-016, FR-041 |
+| `symbols.py` | Extracts classes, methods, functions; captures docstrings, signatures, type hints via `ast.unparse()`; builds placeholders when docstrings absent; **skips private symbols** unless `include_private: true` (DD-12). | FR-013, FR-014, FR-017 |
+| `fastapi_routes.py` | Detects `@app.get/post/...`, `@router.*` decorators; extracts HTTP method, **literal** path, handler, decorator kwargs; dynamic paths rendered as `<dynamic>` with warning (DD-11). | FR-015 |
+| `flask_routes.py` | Detects `@app.route`, `@blueprint.route`; extracts methods, **literal** rule, endpoint; dynamic rules as `<dynamic>`; falls back to handler docstring. | FR-016, FR-041, DD-11 |
 
 ### 5.6 Domain Models (`doc_sync.models`)
 
@@ -275,10 +288,10 @@ All models are **immutable dataclasses** (or frozen Pydantic models if validatio
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `anchors.py` | Generates GitHub-compatible slugs from qualified names (`myapp.services.user.UserService.create_user` → stable heading id). | FR-024, NFR-051 |
+| `anchors.py` | Generates GitHub-compatible slugs from qualified names; **deduplicates collisions** with numeric suffix (`-2`, `-3`). | FR-024, NFR-051 |
 | `markdown_renderer.py` | Renders module pages and `API.md` from `RepositoryIndex`; wraps auto-generated regions in sentinel comments. | FR-020–FR-022, FR-026 |
 | `toc_builder.py` | Builds nested Table of Contents with links to module files and in-page anchors. | FR-021 |
-| `custom_block_merger.py` | Parses existing Markdown for `<!-- custom:start -->` … `<!-- custom:end -->`; splices preserved blocks into newly rendered output. | FR-025, FR-030–FR-032 |
+| `custom_block_merger.py` | Parses existing Markdown for **slot-based** markers `<!-- custom:start <slot-id> -->` … `<!-- custom:end <slot-id> -->`; splices by slot ID; raises **`DocMergeError`** on unclosed/overlapping markers (blocking, DD-03, DD-04). | FR-025, FR-030–FR-032 |
 
 **Auto-generated region convention:**
 
@@ -294,15 +307,17 @@ Only content between `doc-sync:begin/end` is overwritten; custom marker blocks r
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `path_validator.py` | Resolves paths relative to repo root; rejects traversal (`../` escapes); ensures writes stay under `output_dir`. | NFR-011, NFR-022 |
-| `doc_writer.py` | Atomic write (temp file + rename) of Markdown files; creates directories as needed; raises on formatting/I/O failure. | FR-042, FR-044, NFR-013 |
+| `path_validator.py` | Resolves absolute paths; rejects traversal (`../` escapes) and **symlink write targets**; ensures writes stay under `{repo_root}/{output_dir}`; **hashes long module paths** for filenames > 200 chars (DD-01, DD-13). | NFR-011, NFR-022 |
+| `doc_writer.py` | Atomic write (temp file + rename) of Markdown files; creates directories as needed; raises **`DocWriteError`** on I/O failure. | FR-042, FR-044, NFR-013 |
+| `stale_doc_manager.py` | Maintains run manifest of generated files; **prunes orphan** docs under `docs/modules/` when `prune_orphans: true`; skips files containing custom blocks unless `--force-prune`. | FR-022, FR-023, DD-05 |
+| `run_lock.py` | Exclusive lock file `.doc-sync.lock` in output dir; stale TTL 5 minutes; fail fast if lock held. | DD-09 |
 
 ### 5.9 Git Integration (`doc_sync.git`)
 
 | Module | Responsibility | Requirements |
 | --- | --- | --- |
-| `hook_installer.py` | Writes executable pre-commit script to `.git/hooks/pre-commit` or integrates via pre-commit framework entry. | FR-003 |
-| `stager.py` | Runs `git add` on changed files under `docs/` when `--stage` enabled. | FR-027 |
+| `hook_installer.py` | Writes pre-commit script to `.git/hooks/pre-commit`; **backs up existing hook** and chains prior hook after doc-sync (DD-08). | FR-003 |
+| `stager.py` | Runs `git add` via **`subprocess.run([...], shell=False)`** on validated paths under `docs/` when `--stage` enabled (DD-07). | FR-027 |
 
 ---
 
@@ -328,6 +343,7 @@ sequenceDiagram
 
     Dev->>CLI: doc-sync sync [--stage]
     CLI->>Engine: run(config_overrides)
+    Engine->>Engine: acquire RunLock
     Engine->>Config: load(repo_root)
     Config-->>Engine: DocSyncConfig
 
@@ -352,13 +368,20 @@ sequenceDiagram
 
     loop For each output file
         Engine->>Merge: merge(existing, generated)
-        Merge-->>Engine: final_markdown
-        Engine->>Write: write(path, content)
-        alt Write failure
-            Write-->>Engine: raise DocWriteError
+        alt Merge validation failure
+            Merge-->>Engine: DocMergeError
             Engine-->>CLI: exit 1 (blocking)
+        else Success
+            Merge-->>Engine: final_markdown
+            Engine->>Write: write(path, content)
+            alt Write failure
+                Write-->>Engine: raise DocWriteError
+                Engine-->>CLI: exit 1 (blocking)
+            end
         end
     end
+
+    Engine->>Engine: prune stale docs (manifest)
 
     opt --stage flag
         Engine->>Git: stage(output_paths)
@@ -366,6 +389,7 @@ sequenceDiagram
 
     Engine->>Report: build_summary()
     Report-->>CLI: stdout/stderr summary
+    Engine->>Engine: release RunLock
     CLI-->>Dev: exit 0 or 2 (warnings)
 ```
 
@@ -420,12 +444,13 @@ flowchart TD
     Splicer --> Final
 ```
 
-**Merge algorithm (deterministic):**
+**Merge algorithm (deterministic, slot-based — DD-03):**
 
-1. Read existing file (if any); extract all custom-marker regions keyed by marker id/position.
-2. Generate fresh auto-content for each module/API section with `doc-sync:begin/end` sentinels.
-3. Insert preserved custom blocks at their original relative positions (top of file, after module header, etc.) based on marker metadata.
-4. Write atomically to output path.
+1. Read existing file (if any); extract all custom-marker regions keyed by **slot ID** (`<!-- custom:start intro -->`).
+2. Validate all custom blocks are properly closed and non-overlapping; raise **`DocMergeError`** (blocking) if not.
+3. Generate fresh auto-content for each module/API section with `doc-sync:begin/end` sentinels.
+4. Inject preserved custom blocks into **named slots** in the template (e.g., `intro`, `overview`, `notes`); slots with no custom content render empty.
+5. Write atomically to output path; record path in run manifest for orphan pruning.
 
 ---
 
@@ -516,9 +541,12 @@ flowchart TD
     Warn2 --> Render
     Extract -->|Success| Render["Render Markdown"]
     Continue --> ParseFile
-    Render --> Write{"Write files"}
-    Write -->|Failure| Block["Exit code 1 — blocking error"]
-    Write -->|Success| Summary["Print summary"]
+    Render --> MergeCheck{"Merge valid?"}
+    MergeCheck -->|DocMergeError| Block["Exit code 1 — blocking error"]
+    MergeCheck -->|Success| Write{"Write files"}
+    Write -->|Failure| Block
+    Write -->|Success| Prune["Prune stale docs"]
+    Prune --> Summary["Print summary"]
     Summary --> HasWarnings{"Any warnings?"}
     HasWarnings -->|Yes| Exit2["Exit code 2 — partial success"]
     HasWarnings -->|No| Exit0["Exit code 0 — success"]
@@ -529,8 +557,11 @@ flowchart TD
 | Python syntax error in source | Skip file; warn | Non-blocking | Contributes to `2` |
 | Missing docstring | Placeholder entry | Non-blocking | — |
 | Route decorator parse failure | Warn; fallback metadata | Non-blocking | Contributes to `2` |
+| Dynamic route path (non-literal) | Warn; render as `<dynamic>` | Non-blocking | Contributes to `2` |
+| Custom block merge error (unclosed/overlap) | Fail run | **Blocking** | `1` |
 | Markdown render error | Fail run | **Blocking** | `1` |
 | File write / path validation error | Fail run | **Blocking** | `1` |
+| Run lock held by another process | Fail run | **Blocking** | `1` |
 | Success with prior warnings | Complete | Allow commit | `2` |
 | Clean success | Complete | Allow commit | `0` |
 
@@ -538,13 +569,20 @@ flowchart TD
 
 ## 10. Security & Safety Controls
 
-| Control | Implementation |
-| --- | --- |
-| **No code execution** | `ast.parse()` only; never `importlib.import_module()` on target sources |
-| **Path confinement** | `PathValidator` resolves canonical paths; write targets must be under `{repo_root}/{output_dir}` |
-| **No secrets** | Tool is fully offline; no env vars required beyond optional `GIT_DIR` |
-| **Atomic writes** | Prevents partial/corrupt Markdown on crash mid-write |
-| **Read-only source** | Scanner and parser open source files in read mode only |
+| Control | Implementation | Design Review |
+| --- | --- | --- |
+| **No code execution** | `ast.parse()` only; never `importlib.import_module()` on target sources | NFR-021 |
+| **Output sandbox** | `PathValidator` resolves absolute paths; write targets must be strictly under `{repo_root}/{output_dir}`; **symlinks rejected** for write paths | DD-01, DR-001 |
+| **Config safety** | **`yaml.safe_load` only**; strict schema; reject unknown keys; `output_dir` must be relative | DD-02, DR-002 |
+| **Repo root validation** | `--repo-root` normalized to absolute path at startup | DD-03, DR-003 |
+| **Git subprocess hardening** | `subprocess.run([...], shell=False)`; no string interpolation; stage only validated paths | DD-07, DR-004 |
+| **Hook install safety** | Backup existing pre-commit hook; chain rather than silently overwrite | DD-08, DR-005 |
+| **No secrets** | Tool is fully offline; no credential storage | NFR-020 |
+| **Atomic writes** | Temp file + rename prevents partial/corrupt Markdown on crash | NFR-013 |
+| **Read-only source** | Scanner and parser open source files in read mode only | NFR-013 |
+| **Resource limits** | Default 1 MiB max source file size; skip with warning | DD-10, DR-007 |
+| **Concurrency guard** | Exclusive `.doc-sync.lock` with stale TTL | DD-09, DR-014 |
+| **Encoding policy** | UTF-8 strict read with `tokenize.detect_encoding` fallback; skip undecodable files | DR-013 |
 
 ---
 
@@ -568,6 +606,7 @@ automated-doc-sync/
 ├── pyproject.toml
 ├── requirements.md
 ├── architecture.md
+├── design-review.md
 ├── src/
 │   └── doc_sync/
 │       ├── __init__.py
@@ -579,7 +618,8 @@ automated-doc-sync/
 │       │   └── reporter.py
 │       ├── config/
 │       │   ├── loader.py
-│       │   └── schema.py
+│       │   ├── schema.py
+│       │   └── validator.py
 │       ├── scanner/
 │       │   └── repository_scanner.py
 │       ├── parser/
@@ -598,7 +638,9 @@ automated-doc-sync/
 │       │   └── custom_block_merger.py
 │       ├── io/
 │       │   ├── doc_writer.py
-│       │   └── path_validator.py
+│       │   ├── path_validator.py
+│       │   ├── stale_doc_manager.py
+│       │   └── run_lock.py
 │       └── git/
 │           ├── stager.py
 │           └── hook_installer.py
@@ -625,20 +667,55 @@ automated-doc-sync/
 | NFR-001 – NFR-013 | Pipeline design, atomic writes, deterministic sort |
 | NFR-020 – NFR-022 | Security controls (§10) |
 | NFR-040 – NFR-042 | Module boundaries, `tests/` layout |
+| Design Review DD-01 – DD-14 | [design-review.md](./design-review.md); see §14 |
 
 ---
 
-## 14. Open Decisions
+## 14. Design Review Adjustments
 
-| Topic | Proposal | Status |
+The following adjustments were agreed during pre-implementation review ([design-review.md](./design-review.md)):
+
+| ID | Adjustment | Component |
 | --- | --- | --- |
-| One Markdown file per module vs per package | **Per module** default; configurable grouping in v1.1 | Proposed |
-| Hook delivery | Native `.git/hooks/pre-commit` script for MVP | Proposed |
-| `pathspec` dependency | Include if exclude rules need gitignore semantics; otherwise stdlib globs | Proposed |
-| Anchor slug algorithm | GitHub-style: lowercase, hyphenated, deduplicated | Proposed |
+| DD-01 | Strict output sandbox; reject symlink write targets | `io/path_validator.py` |
+| DD-02 | `yaml.safe_load` only; strict config schema | `config/loader.py`, `config/validator.py` |
+| DD-03 | Slot-based custom block markers with named IDs | `renderer/custom_block_merger.py` |
+| DD-04 | Merge validation failures are blocking (`DocMergeError`) | `core/sync_engine.py`, `entrypoints/hook.py` |
+| DD-05 | Orphan doc pruning with custom-block safety guard | `io/stale_doc_manager.py` |
+| DD-06 | Pre-commit incremental sync for staged `.py` changes | `entrypoints/hook.py` |
+| DD-07 | Git subprocess list-args, no shell | `git/stager.py` |
+| DD-08 | Hook chaining with backup on install | `git/hook_installer.py` |
+| DD-09 | Run lock file with stale TTL | `io/run_lock.py` |
+| DD-10 | Source size limit + encoding detection | `parser/ast_parser.py` |
+| DD-11 | Literal-only route paths; `<dynamic>` placeholder | `extractors/fastapi_routes.py`, `extractors/flask_routes.py` |
+| DD-12 | Private symbols excluded by default | `extractors/symbols.py` |
+| DD-13 | Long filename hashing on Windows | `io/path_validator.py` |
+| DD-14 | `pathspec` required dependency | `scanner/repository_scanner.py` |
+
+### Resolved Decisions
+
+| Topic | Decision |
+| --- | --- |
+| One Markdown file per module vs per package | **Per module** default; configurable grouping in v1.1 |
+| Hook delivery | Native `.git/hooks/pre-commit` with chaining and backup |
+| `pathspec` dependency | **Required** for gitignore-compatible excludes |
+| Anchor slug algorithm | GitHub-style: lowercase, hyphenated, deduplicated with numeric suffix |
+| Custom block syntax | `<!-- custom:start <slot-id> -->` … `<!-- custom:end <slot-id> -->` |
 
 ---
 
-## 15. Summary
+## 15. Known Limitations (Accepted for MVP)
 
-The v1 architecture is a **single-process, layered pipeline** triggered by CLI or Git hook. Python's `ast` module feeds immutable domain models; a Markdown renderer and custom-block merger produce deterministic docs under `docs/`; optional Git staging completes the workflow. The design satisfies all MVP functional and non-functional requirements while keeping extension seams clear for multi-language and OpenAPI support later.
+| Limitation | Mitigation |
+| --- | --- |
+| Dynamic route paths (variables, f-strings) | Render as `<dynamic>`; log warning |
+| AST cannot parse syntax errors in target file | Skip file; partial sync |
+| No docstring format normalization (Google/NumPy) | Render docstrings as plain text |
+| Manual edits inside `doc-sync:begin/end` regions | Overwritten by design (document in README) |
+| libCST-level fidelity | Deferred; native `ast` only per requirements |
+
+---
+
+## 16. Summary
+
+The v1 architecture is a **single-process, layered pipeline** triggered by CLI or Git hook. Python's `ast` module feeds immutable domain models; a slot-based Markdown renderer and custom-block merger produce deterministic docs under `docs/`; stale-doc pruning and run locking ensure operational safety; optional Git staging completes the workflow. Pre-implementation design review ([design-review.md](./design-review.md)) validated the design against [requirements.md](./requirements.md) with 14 agreed adjustments incorporated above.
