@@ -1,0 +1,14 @@
+# Example doc-sync configuration (Phase 2 loader will consume this file)
+output_dir: docs
+include:
+  - "**/*.py"
+exclude:
+  - ".git/**"
+  - "venv/**"
+  - ".venv/**"
+  - "__pycache__/**"
+  - "*.egg-info/**"
+stage_on_sync: false
+prune_orphans: true
+include_private: false
+max_source_bytes: 1048576
