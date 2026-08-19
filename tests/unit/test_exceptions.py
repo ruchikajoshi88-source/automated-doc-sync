@@ -31,7 +31,7 @@ def test_exceptions_inherit_from_doc_sync_error(exc_type: type[DocSyncError]) ->
     assert issubclass(exc_type, Exception)
 
 
-def test_exit_codes() -> None:
+def test_exit_codes_match_architecture() -> None:
     assert EXIT_SUCCESS == 0
     assert EXIT_FAILURE == 1
     assert EXIT_PARTIAL == 2
@@ -40,3 +40,8 @@ def test_exit_codes() -> None:
 def test_severity_values() -> None:
     assert Severity.WARNING.value == "warning"
     assert Severity.ERROR.value == "error"
+
+
+def test_doc_sync_error_is_raised_as_base() -> None:
+    with pytest.raises(DocSyncError):
+        raise ConfigError("bad config")

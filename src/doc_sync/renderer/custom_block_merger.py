@@ -1,5 +1,11 @@
-"""Custom Markdown block preservation (Phase 4 — T-020)."""
+"""Slot-based custom Markdown block preservation."""
 
-from doc_sync.renderer.markdown_renderer import CustomBlockMerger
+from __future__ import annotations
 
-__all__ = ["CustomBlockMerger"]
+
+class CustomBlockMerger:
+    """Merges slot-based custom Markdown blocks (Phase 4 — T-020)."""
+
+    def merge(self, existing: str | None, generated: str) -> str:
+        """Splice preserved custom slots into generated Markdown; raise DocMergeError on invalid markers."""
+        raise NotImplementedError("CustomBlockMerger.merge is implemented in Phase 4 (T-020)")

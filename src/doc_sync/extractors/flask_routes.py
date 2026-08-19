@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import ast
 
-from doc_sync.models.documents import ParseIssue, RouteDocument
+from doc_sync.extractors.base import RouteExtractorBase
+from doc_sync.models.documents import RouteDocument
 
 
-class FlaskRouteExtractor:
+class FlaskRouteExtractor(RouteExtractorBase):
     """Detects @app.route and @blueprint.route decorators."""
 
     def extract(self, tree: ast.Module) -> tuple[RouteDocument, ...]:
         """Return Flask route metadata from literal decorator rules."""
+        self._reset_warnings()
         raise NotImplementedError(
-            "FlaskRouteExtractor.extract is implemented in Phase 3 (T-015)"
+            "Flask route extraction is not yet implemented."
         )
-
-    def warnings(self) -> tuple[ParseIssue, ...]:
-        """Warnings collected during the last extract call."""
-        return ()

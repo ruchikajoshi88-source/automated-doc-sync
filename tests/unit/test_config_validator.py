@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from doc_sync.config.schema import DocSyncConfig
+from doc_sync.config.schema import CustomBlockMarkers, DocSyncConfig
 from doc_sync.config.validator import validate_config
 from doc_sync.exceptions import ConfigError
 
@@ -37,4 +37,31 @@ def test_validate_config_rejects_missing_repo_root(tmp_path: Path) -> None:
 def test_validate_config_rejects_empty_include(tmp_path: Path) -> None:
     config = DocSyncConfig(repo_root=tmp_path, include=())
     with pytest.raises(ConfigError, match="include"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_empty_exclude(tmp_path: Path) -> None:
+    config = DocSyncConfig(repo_root=tmp_path, exclude=())
+    with pytest.raises(ConfigError, match="exclude"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_output_dir_escape(tmp_path: Path) -> None:
+    config = DocSyncConfig(repo_root=tmp_path, output_dir="../outside")
+    with pytest.raises(ConfigError, match="output_dir"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_empty_output_dir(tmp_path: Path) -> None:
+    config = DocSyncConfig(repo_root=tmp_path, output_dir="  ")
+    with pytest.raises(ConfigError, match="output_dir"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_identical_custom_markers(tmp_path: Path) -> None:
+    config = DocSyncConfig(
+        repo_root=tmp_path,
+        custom_block_markers=CustomBlockMarkers(start="<!-- x", end="<!-- x"),
+    )
+    with pytest.raises(ConfigError, match="custom_block_markers"):
         validate_config(config)
