@@ -1,5 +1,14 @@
-"""Table of contents generation (Phase 4 — T-018)."""
+"""Nested table-of-contents generation from a repository index."""
 
-from doc_sync.renderer.markdown_renderer import TocBuilder
+from __future__ import annotations
 
-__all__ = ["TocBuilder"]
+from doc_sync.config.schema import DocSyncConfig
+from doc_sync.models.documents import RepositoryIndex
+
+
+class TocBuilder:
+    """Builds nested table-of-contents Markdown (Phase 4 — T-018)."""
+
+    def build(self, index: RepositoryIndex, config: DocSyncConfig) -> str:
+        """Return nested TOC Markdown linking to module pages and in-page anchors."""
+        raise NotImplementedError("TocBuilder.build is implemented in Phase 4 (T-018)")

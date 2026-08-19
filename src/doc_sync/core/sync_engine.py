@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from doc_sync.config.schema import DocSyncConfig
 from doc_sync.exceptions import EXIT_SUCCESS
 from doc_sync.models.documents import ParseIssue
 
@@ -36,7 +37,7 @@ class SyncResult:
 class SyncEngine:
     """End-to-end documentation sync orchestrator (Phase 5 — T-023)."""
 
-    def __init__(self, config: object) -> None:
+    def __init__(self, config: DocSyncConfig) -> None:
         self._config = config
 
     def run(self, *, stage: bool = False, force_prune: bool = False, full: bool = True) -> SyncResult:
